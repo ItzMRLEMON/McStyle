@@ -142,11 +142,19 @@ function App() {
   });
   const [communityOpen, setCommunityOpen] = useState(true);
   const [utilsOpen, setUtilsOpen] = useState(true);
+  const [utilsOrder, setUtilsOrder] = useState(null);
   const [copied, setCopied] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem('mcstyle_theme') || 'default');
   const [openMenu, setOpenMenu] = useState(null);
   const [onlineCount, setOnlineCount] = useState(0);
   const [showAdmin, setShowAdmin] = useState(false);
+  const [showProfileMenu, setShowProfileMenu] = useState(false);
+  const [showProfileClear, setShowProfileClear] = useState(false);
+  const [profileClearText, setProfileClearText] = useState('');
+  const [showLoginModal, setShowLoginModal] = useState(false);
+  const profileMenuRef = useRef(null);
+  const wsRef = useRef(null);
+  const wsHandlersRef = useRef(new Set());
   const textareaRef = useRef(null);
   const snifferCooldown = useRef(false);
   const clickTimeout = useRef(null);
@@ -157,19 +165,36 @@ function App() {
     localStorage.setItem('mcstyle_theme', theme);
   }, [theme]);
 
-  // WebSocket for online count
+  // Shared WebSocket for online count + community updates
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'online_count') {
-          setOnlineCount(data.count);
-        }
-      } catch { /* ignore */ }
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    let ws;
+    let reconnectTimer;
+
+    function connect() {
+      ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'online_count') {
+            setOnlineCount(data.count);
+          }
+          // Forward all messages to registered handlers
+          for (const handler of wsHandlersRef.current) {
+            handler(data);
+          }
+        } catch { /* ignore */ }
+      };
+      ws.onclose = () => { reconnectTimer = setTimeout(connect, 3000); };
+    }
+
+    connect();
+    return () => {
+      clearTimeout(reconnectTimer);
+      if (ws) ws.close();
     };
-    return () => ws.close();
   }, []);
 
   // Close menu on click outside
@@ -183,6 +208,20 @@ function App() {
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [openMenu]);
+
+  // Close profile menu on click outside
+  useEffect(() => {
+    if (!showProfileMenu) return;
+    const handler = (e) => {
+      if (profileMenuRef.current && !profileMenuRef.current.contains(e.target)) {
+        setShowProfileMenu(false);
+        setShowProfileClear(false);
+        setProfileClearText('');
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showProfileMenu]);
 
   const playSnifferSound = () => {
     if (snifferCooldown.current) return;
@@ -229,6 +268,9 @@ function App() {
       if (data.theme) {
         setTheme(data.theme);
       }
+      if (data.utilsOrder) {
+        setUtilsOrder(data.utilsOrder);
+      }
       if (data.tabs && data.tabs.length > 0) {
         const cloudTabs = data.tabs.map(t => ({
           ...createTab(t.name, t.rawText),
@@ -251,13 +293,13 @@ function App() {
       fetch('/api/user/data', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ theme, tabs: strippedTabs }),
+        body: JSON.stringify({ theme, tabs: strippedTabs, utilsOrder }),
       }).catch(() => {});
     }, 3000);
     return () => {
       if (cloudSaveTimer.current) clearTimeout(cloudSaveTimer.current);
     };
-  }, [tabs, theme, discordUser]);
+  }, [tabs, theme, utilsOrder, discordUser]);
 
   useEffect(() => {
     // Check if user is logged in
@@ -623,6 +665,21 @@ function App() {
           )}
         </div>
         <div className="menubar-separator-v" />
+        <div className="menubar-item" onClick={() => {
+          if (/^Tab \d+$/.test(tab.name)) {
+            setNamePromptValue(tab.name);
+            setShowNamePrompt(true);
+          } else {
+            saveCurrentTabRef.current();
+          }
+          setOpenMenu(null);
+        }}>Save</div>
+        <div className="menubar-item" onClick={() => {
+          setNamePromptValue(tab.name);
+          setShowNamePrompt(true);
+          setOpenMenu(null);
+        }}>Save As</div>
+        <div className="menubar-separator-v" />
         <div className="menubar-item" onClick={() => { importFile(); setOpenMenu(null); }}>Import</div>
         <div className="menubar-item" onClick={() => { exportTab(); setOpenMenu(null); }}>Export</div>
       </div>
@@ -637,28 +694,100 @@ function App() {
           {onlineCount} online
         </div>
         {discordUser ? (
-          <div className="menubar-user">
-            <img
-              src={discordUser.avatar}
-              alt=""
-              className="menubar-avatar"
-            />
-            <span className="menubar-username">{discordUser.username}</span>
+          <div className="menubar-profile-wrap" ref={profileMenuRef}>
+            <button
+              className="menubar-user"
+              onClick={() => { setShowProfileMenu(v => !v); setShowProfileClear(false); setProfileClearText(''); }}
+            >
+              {discordUser.avatar
+                ? <img src={discordUser.avatar} alt="" className="menubar-avatar" />
+                : <span className="menubar-avatar-placeholder">{(discordUser.globalName || '?')[0]}</span>
+              }
+              <span className="menubar-username">{discordUser.username}</span>
+            </button>
+            {showProfileMenu && (
+              <div className="menubar-profile-dropdown">
+                {!showProfileClear ? (
+                  <>
+                    <button className="profile-dropdown-item danger" onClick={() => setShowProfileClear(true)}>
+                      Clear All Data
+                    </button>
+                    <button className="profile-dropdown-item" onClick={async () => {
+                      await fetch('/api/auth/logout', { method: 'POST' });
+                      window.location.reload();
+                    }}>
+                      Logout
+                    </button>
+                  </>
+                ) : (
+                  <div className="profile-dropdown-confirm">
+                    <p className="profile-dropdown-warn">This will delete ALL your shared styles and data. This cannot be undone.</p>
+                    <p className="profile-dropdown-warn-sub">Type <strong>confirm</strong> to proceed:</p>
+                    <input
+                      type="text"
+                      className="profile-confirm-input"
+                      placeholder="Type confirm..."
+                      value={profileClearText}
+                      onChange={(e) => setProfileClearText(e.target.value)}
+                      autoFocus
+                    />
+                    <div className="profile-confirm-actions">
+                      <button
+                        className="profile-dropdown-item"
+                        onClick={() => { setShowProfileClear(false); setProfileClearText(''); }}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="profile-dropdown-item danger"
+                        disabled={profileClearText !== 'confirm'}
+                        onClick={async () => {
+                          await fetch('/api/auth/clear-data', { method: 'POST' });
+                          setShowProfileMenu(false);
+                          setShowProfileClear(false);
+                          setProfileClearText('');
+                        }}
+                      >
+                        Delete Everything
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         ) : !authLoading && (
-          <button className="menubar-login-btn" onClick={async () => {
-            try {
-              const res = await fetch('/api/auth/discord-url');
-              const data = await res.json();
-              if (data.url) window.location.href = data.url;
-            } catch { /* */ }
-          }}>
-            <span className="menubar-avatar-placeholder">?</span>
-            <img src="https://img.icons8.com/ios/50/discord-logo--v1.png" alt="" width="14" height="14" style={{ filter: 'invert(1)' }} />
-            Login
-          </button>
+          <>
+            <button className="menubar-login-btn" onClick={() => setShowLoginModal(true)}>
+              <span className="menubar-avatar-placeholder">?</span>
+              Login
+            </button>
+            {showLoginModal && (
+              <div className="login-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowLoginModal(false); }}>
+                <div className="login-modal">
+                  <button className="login-modal-close" onClick={() => setShowLoginModal(false)}>&times;</button>
+                  <svg width="48" height="48" viewBox="0 0 24 24" fill="#5865F2"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
+                  <h3 className="login-modal-title">Login with Discord</h3>
+                  <ul className="login-modal-benefits">
+                    <li>Save your projects to the cloud</li>
+                    <li>Share styles with the community</li>
+                    <li>Access your work from any device</li>
+                  </ul>
+                  <button className="login-modal-proceed" onClick={async () => {
+                    try {
+                      const res = await fetch('/api/auth/discord-url');
+                      const data = await res.json();
+                      if (data.url) window.location.href = data.url;
+                    } catch { /* */ }
+                  }}>
+                    Continue with Discord
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
         )}
-        <span className="menubar-version">v1.0.0</span>
+        <span className="menubar-version">v1.1.3</span>
       </div>
     </div>
 
@@ -670,6 +799,7 @@ function App() {
       onModify={handleModify}
       discordUser={discordUser}
       authLoading={authLoading}
+      wsHandlersRef={wsHandlersRef}
     />
     <div className="app">
 
@@ -1051,7 +1181,7 @@ function App() {
       </footer>
 
     </div>
-    <UtilsPanel open={utilsOpen} onToggle={setUtilsOpen} />
+    <UtilsPanel open={utilsOpen} onToggle={setUtilsOpen} utilsOrder={utilsOrder} onUtilsOrderChange={setUtilsOrder} />
     <AdminPanel show={showAdmin} onClose={() => setShowAdmin(false)} />
     </div>
     </>

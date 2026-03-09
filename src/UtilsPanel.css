@@ -86,6 +86,31 @@
   opacity: 0.5;
 }
 
+/* Drag handle */
+.util-drag-handle {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-right: 8px;
+  cursor: grab;
+  opacity: 0.4;
+  transition: opacity 0.15s;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.util-section:hover .util-drag-handle {
+  opacity: 0.8;
+}
+
+.util-section.drag-over {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.util-section[draggable="true"] {
+  cursor: default;
+}
+
 .util-section-header {
   width: 100%;
   display: flex;
@@ -316,4 +341,25 @@
 
 .utils-list::-webkit-scrollbar-thumb:hover {
   background: var(--text-dim);
+}
+
+/* Mobile: sidebar overlays content */
+@media (max-width: 600px) {
+  .utils-sidebar {
+    position: fixed;
+    top: 40px;
+    right: 0;
+    height: calc(100vh - 40px);
+    z-index: 900;
+    box-shadow: -4px 0 20px rgba(0, 0, 0, 0.5);
+  }
+
+  .utils-sidebar.open {
+    width: 280px;
+  }
+
+  .utils-sidebar.collapsed {
+    width: 32px;
+    box-shadow: none;
+  }
 }

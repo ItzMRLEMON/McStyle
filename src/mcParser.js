@@ -247,26 +247,3 @@ function parseGradientText(text, startColor, endColor, formatting) {
   return spans;
 }
 
-/**
- * Generate the LuckPerms format string from user inputs
- */
-export function generateLPFormat({ prefix, username, gradient, formatCodes, singleColor }) {
-  let result = '';
-
-  if (gradient.enabled) {
-    result += `<${gradient.startColor}>`;
-    formatCodes.forEach(code => { result += `&${code}`; });
-    result += prefix;
-    result += `</${gradient.endColor}>`;
-  } else if (singleColor) {
-    result += `<${singleColor}>`;
-    formatCodes.forEach(code => { result += `&${code}`; });
-    result += prefix;
-  } else {
-    formatCodes.forEach(code => { result += `&${code}`; });
-    result += prefix;
-  }
-
-  result += ` &f${username}`;
-  return result;
-}

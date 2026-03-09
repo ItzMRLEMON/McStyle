@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import './UtilsPanel.css';
 
 // ===== TINY TEXT DATA =====
@@ -87,8 +87,18 @@ function saveUtilsState(state) {
   localStorage.setItem('mcstyle_utils', JSON.stringify(state));
 }
 
+function loadLocalOrder() {
+  try {
+    return JSON.parse(localStorage.getItem('mcstyle_utils_order'));
+  } catch { return null; }
+}
+
+function saveLocalOrder(order) {
+  localStorage.setItem('mcstyle_utils_order', JSON.stringify(order));
+}
+
 // ===== COLLAPSIBLE SECTION =====
-function UtilSection({ id, title, disabled, savedState, onStateChange, children }) {
+function UtilSection({ id, title, disabled, savedState, onStateChange, children, draggable, onDragStart, onDragOver, onDragEnd, isDragOver }) {
   const [expanded, setExpanded] = useState(savedState?.expanded ?? false);
 
   const toggle = () => {
@@ -99,8 +109,15 @@ function UtilSection({ id, title, disabled, savedState, onStateChange, children 
   };
 
   return (
-    <div className={`util-section ${expanded ? 'expanded' : ''} ${disabled ? 'disabled' : ''}`}>
+    <div
+      className={`util-section ${expanded ? 'expanded' : ''} ${disabled ? 'disabled' : ''} ${isDragOver ? 'drag-over' : ''}`}
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDragEnd={onDragEnd}
+    >
       <button className="util-section-header" onClick={toggle}>
+        <span className="util-drag-handle" title="Drag to reorder">{'\u2630'}</span>
         <span className="util-section-title">{title}</span>
         {disabled ? (
           <span className="util-coming-soon">Coming Soon</span>
@@ -264,9 +281,38 @@ function ColorKeyUtil() {
   );
 }
 
+// ===== SECTION DEFINITIONS =====
+const ALL_SECTIONS = [
+  { id: 'colorkey', title: 'Minecraft Color Key' },
+  { id: 'tinytext', title: 'Tiny Text Generator' },
+  { id: 'textgen', title: 'Text Generators' },
+  ...COMING_SOON.map(name => ({ id: name, title: name, disabled: true })),
+];
+
+const DEFAULT_ORDER = ALL_SECTIONS.map(s => s.id);
+
+function renderSectionContent(id, utilsState, updateSection) {
+  if (id === 'colorkey') return <ColorKeyUtil />;
+  if (id === 'tinytext') return (
+    <TinyTextUtil
+      savedState={utilsState.tinytext}
+      onStateChange={(data) => updateSection('tinytext', { ...data, expanded: true })}
+    />
+  );
+  if (id === 'textgen') return (
+    <TextGenUtil
+      savedState={utilsState.textgen}
+      onStateChange={(data) => updateSection('textgen', { ...data, expanded: true })}
+    />
+  );
+  return null;
+}
+
 // ===== MAIN PANEL =====
-export default function UtilsPanel({ open, onToggle }) {
+export default function UtilsPanel({ open, onToggle, utilsOrder, onUtilsOrderChange }) {
   const [utilsState, setUtilsState] = useState(loadUtilsState);
+  const dragItemRef = useRef(null);
+  const [dragOverId, setDragOverId] = useState(null);
 
   const updateSection = (id, data) => {
     setUtilsState(prev => {
@@ -275,6 +321,56 @@ export default function UtilsPanel({ open, onToggle }) {
       return next;
     });
   };
+
+  // Use cloud order > localStorage order > default
+  const order = (() => {
+    const source = utilsOrder || loadLocalOrder();
+    if (!source || !Array.isArray(source)) return DEFAULT_ORDER;
+    // Add any missing sections at the end
+    const combined = [...source];
+    for (const id of DEFAULT_ORDER) {
+      if (!combined.includes(id)) combined.push(id);
+    }
+    // Remove any that no longer exist
+    return combined.filter(id => DEFAULT_ORDER.includes(id));
+  })();
+
+  const sectionMap = Object.fromEntries(ALL_SECTIONS.map(s => [s.id, s]));
+
+  const handleDragStart = useCallback((e, id) => {
+    dragItemRef.current = id;
+    e.dataTransfer.effectAllowed = 'move';
+    // Make the drag image slightly transparent
+    e.currentTarget.style.opacity = '0.5';
+  }, []);
+
+  const handleDragOver = useCallback((e, id) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (dragItemRef.current && dragItemRef.current !== id) {
+      setDragOverId(id);
+    }
+  }, []);
+
+  const handleDragEnd = useCallback((e) => {
+    e.currentTarget.style.opacity = '1';
+    const fromId = dragItemRef.current;
+    const toId = dragOverId;
+    dragItemRef.current = null;
+    setDragOverId(null);
+
+    if (!fromId || !toId || fromId === toId) return;
+
+    const newOrder = [...order];
+    const fromIdx = newOrder.indexOf(fromId);
+    const toIdx = newOrder.indexOf(toId);
+    if (fromIdx === -1 || toIdx === -1) return;
+    newOrder.splice(fromIdx, 1);
+    newOrder.splice(toIdx, 0, fromId);
+
+    saveLocalOrder(newOrder);
+    if (onUtilsOrderChange) onUtilsOrderChange(newOrder);
+  }, [order, dragOverId, onUtilsOrderChange]);
 
   return (
     <div className={`utils-sidebar ${open ? 'open' : 'collapsed'}`}>
@@ -285,49 +381,27 @@ export default function UtilsPanel({ open, onToggle }) {
           </div>
 
           <div className="utils-list">
-            <UtilSection
-              id="colorkey"
-              title="Minecraft Color Key"
-              savedState={utilsState.colorkey}
-              onStateChange={updateSection}
-            >
-              <ColorKeyUtil />
-            </UtilSection>
-
-            <UtilSection
-              id="tinytext"
-              title="Tiny Text Generator"
-              savedState={utilsState.tinytext}
-              onStateChange={updateSection}
-            >
-              <TinyTextUtil
-                savedState={utilsState.tinytext}
-                onStateChange={(data) => updateSection('tinytext', { ...data, expanded: true })}
-              />
-            </UtilSection>
-
-            <UtilSection
-              id="textgen"
-              title="Text Generators"
-              savedState={utilsState.textgen}
-              onStateChange={updateSection}
-            >
-              <TextGenUtil
-                savedState={utilsState.textgen}
-                onStateChange={(data) => updateSection('textgen', { ...data, expanded: true })}
-              />
-            </UtilSection>
-
-            {COMING_SOON.map((name) => (
-              <UtilSection
-                key={name}
-                id={name}
-                title={name}
-                disabled
-                savedState={{}}
-                onStateChange={() => {}}
-              />
-            ))}
+            {order.map(id => {
+              const section = sectionMap[id];
+              if (!section) return null;
+              return (
+                <UtilSection
+                  key={id}
+                  id={id}
+                  title={section.title}
+                  disabled={section.disabled}
+                  savedState={utilsState[id]}
+                  onStateChange={updateSection}
+                  draggable={true}
+                  onDragStart={(e) => handleDragStart(e, id)}
+                  onDragOver={(e) => handleDragOver(e, id)}
+                  onDragEnd={handleDragEnd}
+                  isDragOver={dragOverId === id}
+                >
+                  {renderSectionContent(id, utilsState, updateSection)}
+                </UtilSection>
+              );
+            })}
           </div>
         </>
       )}

@@ -669,3 +669,24 @@
 .community-body::-webkit-scrollbar-thumb:hover {
   background: var(--text-dim);
 }
+
+/* Mobile: sidebar overlays content */
+@media (max-width: 600px) {
+  .community-sidebar {
+    position: fixed;
+    top: 40px;
+    left: 0;
+    height: calc(100vh - 40px);
+    z-index: 900;
+    box-shadow: 4px 0 20px rgba(0, 0, 0, 0.5);
+  }
+
+  .community-sidebar.open {
+    width: 280px;
+  }
+
+  .community-sidebar.collapsed {
+    width: 32px;
+    box-shadow: none;
+  }
+}

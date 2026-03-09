@@ -1,11 +1,10 @@
 services:
-  api:
-    build:
-      context: .
-      target: api
-    container_name: mcstyle-api
+  app:
+    image: celestered/mcstyle:latest
+    build: .
+    container_name: mcstyle
     ports:
-      - "5859:5858"
+      - "5858:5858"
     volumes:
       - mcstyle-data:/app/data
     environment:
@@ -14,17 +13,6 @@ services:
       - DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID:-}
       - DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET:-}
       - DISCORD_REDIRECT_URI=${DISCORD_REDIRECT_URI:-https://mcstyle.notceleste.xyz}
-    restart: unless-stopped
-
-  web:
-    build:
-      context: .
-      target: web
-    container_name: mcstyle-web
-    ports:
-      - "5858:80"
-    depends_on:
-      - api
     restart: unless-stopped
 
 volumes:

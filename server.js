@@ -18,11 +18,77 @@ const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || '';
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET || '';
 const DISCORD_REDIRECT_URI = process.env.DISCORD_REDIRECT_URI || 'http://localhost:5173';
 const ADMIN_DISCORD_ID = process.env.ADMIN_DISCORD_ID || '';
+const IS_HTTPS = DISCORD_REDIRECT_URI.startsWith('https');
 
-// In-memory session store: token -> { discordId, username, discriminator, avatar, globalName }
+// Data file paths (persisted in Docker volume)
+const DATA_DIR = process.env.DATA_DIR || join(__dirname, 'data');
+const DATA_FILE = join(DATA_DIR, 'styles.json');
+const BANNED_FILE = join(DATA_DIR, 'banned_ips.json');
+const BANNED_DISCORD_FILE = join(DATA_DIR, 'banned_discord.json');
+const USERS_FILE = join(DATA_DIR, 'users.json');
+const SESSIONS_FILE = join(DATA_DIR, 'sessions.json');
+
+if (!existsSync(DATA_DIR)) {
+  mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// --- In-memory data cache (load once, write on change) ---
+
+function loadJSON(path, fallback) {
+  if (!existsSync(path)) return fallback;
+  try { return JSON.parse(readFileSync(path, 'utf-8')); }
+  catch { return fallback; }
+}
+
+function saveJSON(path, data) {
+  writeFileSync(path, JSON.stringify(data, null, 2));
+}
+
+let styles = loadJSON(DATA_FILE, []);
+let bannedIPs = loadJSON(BANNED_FILE, []);
+let bannedDiscords = loadJSON(BANNED_DISCORD_FILE, []);
+let users = loadJSON(USERS_FILE, {});
+
+function persistStyles() { saveJSON(DATA_FILE, styles); }
+function persistBannedIPs() { saveJSON(BANNED_FILE, bannedIPs); }
+function persistBannedDiscords() { saveJSON(BANNED_DISCORD_FILE, bannedDiscords); }
+function persistUsers() { saveJSON(USERS_FILE, users); }
+
+// --- Persistent sessions (survive restarts) ---
+
 const sessions = new Map();
 
-// WebSocket server
+function loadSessions() {
+  const data = loadJSON(SESSIONS_FILE, []);
+  const now = Date.now();
+  for (const [token, session] of data) {
+    if (session.expiresAt > now) {
+      sessions.set(token, session);
+    }
+  }
+}
+
+function persistSessions() {
+  saveJSON(SESSIONS_FILE, [...sessions.entries()]);
+}
+
+loadSessions();
+
+// Clean expired sessions every hour
+setInterval(() => {
+  const now = Date.now();
+  let changed = false;
+  for (const [token, session] of sessions) {
+    if (session.expiresAt <= now) {
+      sessions.delete(token);
+      changed = true;
+    }
+  }
+  if (changed) persistSessions();
+}, 60 * 60 * 1000);
+
+// --- WebSocket server ---
+
 const wss = new WebSocketServer({ server, path: '/ws' });
 
 function broadcast(data) {
@@ -93,7 +159,8 @@ setInterval(() => {
   }
 }, 30000);
 
-// Profanity filter - strict with bypass detection
+// --- Profanity filter ---
+
 const filter = new Filter();
 filter.addWords(
   'nazi', 'hitler', 'heil', 'swastika', 'kkk', 'whitepow',
@@ -149,102 +216,35 @@ function isStrictProfane(text) {
   return false;
 }
 
-// Data file paths (persisted in Docker volume)
-const DATA_DIR = process.env.DATA_DIR || join(__dirname, 'data');
-const DATA_FILE = join(DATA_DIR, 'styles.json');
-const BANNED_FILE = join(DATA_DIR, 'banned_ips.json');
-const BANNED_DISCORD_FILE = join(DATA_DIR, 'banned_discord.json');
-const USERS_FILE = join(DATA_DIR, 'users.json');
+// --- Helpers ---
 
-if (!existsSync(DATA_DIR)) {
-  mkdirSync(DATA_DIR, { recursive: true });
-}
+const ALLOWED_EMOJIS = ['\uD83D\uDD25', '\u2764\uFE0F', '\uD83D\uDE02', '\uD83C\uDFA8'];
 
-function loadStyles() {
-  if (!existsSync(DATA_FILE)) return [];
-  try {
-    return JSON.parse(readFileSync(DATA_FILE, 'utf-8'));
-  } catch {
-    return [];
-  }
-}
-
-function saveStyles(styles) {
-  writeFileSync(DATA_FILE, JSON.stringify(styles, null, 2));
-}
-
-function loadBannedIPs() {
-  if (!existsSync(BANNED_FILE)) return [];
-  try {
-    return JSON.parse(readFileSync(BANNED_FILE, 'utf-8'));
-  } catch {
-    return [];
-  }
-}
-
-function saveBannedIPs(ips) {
-  writeFileSync(BANNED_FILE, JSON.stringify(ips, null, 2));
-}
-
-function loadBannedDiscords() {
-  if (!existsSync(BANNED_DISCORD_FILE)) return [];
-  try {
-    return JSON.parse(readFileSync(BANNED_DISCORD_FILE, 'utf-8'));
-  } catch {
-    return [];
-  }
-}
-
-function saveBannedDiscords(ids) {
-  writeFileSync(BANNED_DISCORD_FILE, JSON.stringify(ids, null, 2));
-}
-
-function loadUsers() {
-  if (!existsSync(USERS_FILE)) return {};
-  try {
-    return JSON.parse(readFileSync(USERS_FILE, 'utf-8'));
-  } catch {
-    return {};
-  }
-}
-
-function saveUsers(users) {
-  writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
-}
-
-const ALLOWED_EMOJIS = ['🔥', '❤️', '😂', '🎨'];
-
-// Convert raw reactions (with discordId arrays) to public counts
 function getPublicReactions(reactions, sessionDiscordId) {
   if (!reactions) {
-    const result = { up: 0, down: 0, emojis: {}, userVote: null, userEmojis: [] };
-    return result;
+    return { up: 0, down: 0, emojis: {}, userVote: null, userEmojis: [] };
   }
   const up = (reactions.up || []).length;
   const down = (reactions.down || []).length;
   const emojis = {};
-  for (const [emoji, users] of Object.entries(reactions.emojis || {})) {
-    if (users.length > 0) emojis[emoji] = users.length;
+  for (const [emoji, emojiUsers] of Object.entries(reactions.emojis || {})) {
+    if (emojiUsers.length > 0) emojis[emoji] = emojiUsers.length;
   }
   let userVote = null;
   let userEmojis = [];
   if (sessionDiscordId) {
     if ((reactions.up || []).includes(sessionDiscordId)) userVote = 'up';
     else if ((reactions.down || []).includes(sessionDiscordId)) userVote = 'down';
-    for (const [emoji, users] of Object.entries(reactions.emojis || {})) {
-      if (users.includes(sessionDiscordId)) userEmojis.push(emoji);
+    for (const [emoji, emojiUsers] of Object.entries(reactions.emojis || {})) {
+      if (emojiUsers.includes(sessionDiscordId)) userEmojis.push(emoji);
     }
   }
   return { up, down, emojis, userVote, userEmojis };
 }
 
-let bannedIPs = loadBannedIPs();
-let bannedDiscords = loadBannedDiscords();
-
 function getClientIP(req) {
-  let ip = getClientIP(req) || '';
+  let ip = req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.socket.remoteAddress || '';
   if (ip.includes(',')) ip = ip.split(',')[0].trim();
-  // Strip IPv6-mapped IPv4 prefix (::ffff:1.2.3.4 -> 1.2.3.4)
   if (ip.startsWith('::ffff:')) ip = ip.slice(7);
   return ip;
 }
@@ -255,20 +255,15 @@ const lastPostTime = new Map();
 
 function checkRateLimit(ip) {
   const now = Date.now();
-
-  // 5 second cooldown
   const lastTime = lastPostTime.get(ip) || 0;
   if (now - lastTime < 5000) {
     return { allowed: false, reason: 'Please wait 5 seconds between submissions.' };
   }
-
-  // Max 5 per minute
   const entry = rateLimits.get(ip) || [];
   const recent = entry.filter(t => now - t < 60000);
   if (recent.length >= 5) {
     return { allowed: false, reason: 'Too many submissions. Wait a minute.' };
   }
-
   recent.push(now);
   rateLimits.set(ip, recent);
   lastPostTime.set(ip, now);
@@ -282,38 +277,49 @@ setInterval(() => {
     if (recent.length === 0) rateLimits.delete(ip);
     else rateLimits.set(ip, recent);
   }
-  // Clean old lastPostTime entries
   for (const [ip, time] of lastPostTime) {
     if (now - time > 60000) lastPostTime.delete(ip);
   }
 }, 300000);
-
-// Admin auth middleware - password OR Discord admin ID
-function requireAdmin(req, res, next) {
-  const auth = req.headers['x-admin-password'];
-  if (auth === ADMIN_PASSWORD) return next();
-
-  // Check if logged-in Discord user is the admin
-  const session = getSession(req);
-  if (session && ADMIN_DISCORD_ID && session.discordId === ADMIN_DISCORD_ID) return next();
-
-  return res.status(401).json({ error: 'Unauthorized.' });
-}
-
-app.use(express.json());
-app.use(express.static(join(__dirname, 'dist')));
 
 // Parse session token from cookie
 function getSession(req) {
   const cookies = req.headers.cookie || '';
   const match = cookies.match(/mcstyle_token=([^;]+)/);
   if (!match) return null;
-  return sessions.get(match[1]) || null;
+  const session = sessions.get(match[1]);
+  if (!session) return null;
+  if (session.expiresAt <= Date.now()) {
+    sessions.delete(match[1]);
+    return null;
+  }
+  return session;
 }
 
 function generateToken() {
   return randomBytes(32).toString('hex');
 }
+
+function makeCookie(name, value, maxAge) {
+  let cookie = `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`;
+  if (IS_HTTPS) cookie += '; Secure';
+  return cookie;
+}
+
+// Admin auth middleware
+function requireAdmin(req, res, next) {
+  const auth = req.headers['x-admin-password'];
+  if (auth === ADMIN_PASSWORD) return next();
+  const session = getSession(req);
+  if (session && ADMIN_DISCORD_ID && session.discordId === ADMIN_DISCORD_ID) return next();
+  return res.status(401).json({ error: 'Unauthorized.' });
+}
+
+// --- Express setup ---
+
+const MAX_BODY_SIZE = '1mb';
+app.use(express.json({ limit: MAX_BODY_SIZE }));
+app.use(express.static(join(__dirname, 'dist')));
 
 // --- Discord OAuth Routes ---
 
@@ -335,7 +341,6 @@ app.post('/api/auth/callback', async (req, res) => {
   if (!code) return res.status(400).json({ error: 'No code provided.' });
 
   try {
-    // Exchange code for token
     const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -352,7 +357,6 @@ app.post('/api/auth/callback', async (req, res) => {
       return res.status(400).json({ error: 'Failed to authenticate with Discord.' });
     }
 
-    // Get user info
     const userRes = await fetch('https://discord.com/api/users/@me', {
       headers: { Authorization: `Bearer ${tokenData.access_token}` },
     });
@@ -361,6 +365,7 @@ app.post('/api/auth/callback', async (req, res) => {
       return res.status(400).json({ error: 'Failed to get Discord user info.' });
     }
 
+    const maxAge = 30 * 24 * 60 * 60; // 30 days in seconds
     const user = {
       discordId: userData.id,
       username: userData.username,
@@ -368,28 +373,26 @@ app.post('/api/auth/callback', async (req, res) => {
       avatar: userData.avatar
         ? `https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png`
         : null,
+      expiresAt: Date.now() + maxAge * 1000,
     };
 
-    // Create session
     const token = generateToken();
     sessions.set(token, user);
+    persistSessions();
 
-    // Persist profile info so admin panel can always show it
+    // Persist profile info for admin panel
     const loginIp = getClientIP(req);
-    const users = loadUsers();
     const existing = users[user.discordId] || {};
     existing.discordUsername = user.username;
     existing.discordGlobalName = user.globalName;
     existing.discordAvatar = user.avatar;
     existing.lastIp = loginIp;
     users[user.discordId] = existing;
-    saveUsers(users);
+    persistUsers();
 
-    // Set cookie (30 days)
-    res.setHeader('Set-Cookie',
-      `mcstyle_token=${token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=${30 * 24 * 60 * 60}`
-    );
-    res.json({ user });
+    res.setHeader('Set-Cookie', makeCookie('mcstyle_token', token, maxAge));
+    const { expiresAt, ...publicUser } = user;
+    res.json({ user: publicUser });
   } catch (err) {
     console.error('Discord OAuth error:', err);
     res.status(500).json({ error: 'Discord authentication failed.' });
@@ -400,37 +403,36 @@ app.get('/api/auth/me', (req, res) => {
   const session = getSession(req);
   if (!session) return res.status(401).json(null);
   const isAdmin = !!(ADMIN_DISCORD_ID && session.discordId === ADMIN_DISCORD_ID);
-  res.json({ ...session, isAdmin });
+  const { expiresAt, ...publicSession } = session;
+  res.json({ ...publicSession, isAdmin });
 });
 
 app.post('/api/auth/logout', (req, res) => {
   const cookies = req.headers.cookie || '';
   const match = cookies.match(/mcstyle_token=([^;]+)/);
-  if (match) sessions.delete(match[1]);
-  res.setHeader('Set-Cookie', 'mcstyle_token=; Path=/; HttpOnly; Max-Age=0');
+  if (match) {
+    sessions.delete(match[1]);
+    persistSessions();
+  }
+  res.setHeader('Set-Cookie', makeCookie('mcstyle_token', '', 0));
   res.json({ success: true });
 });
 
 app.post('/api/auth/clear-data', (req, res) => {
   const session = getSession(req);
   if (!session) return res.status(401).json({ error: 'Not authenticated' });
-  const styles = loadStyles();
-  const filtered = styles.filter(s => s.discordId !== session.discordId);
-  saveStyles(filtered);
-  // Broadcast deletions so other clients see the removal
   const removed = styles.filter(s => s.discordId === session.discordId);
+  styles = styles.filter(s => s.discordId !== session.discordId);
+  persistStyles();
   removed.forEach(s => broadcast({ type: 'delete_style', id: s.id }));
   res.json({ success: true, deleted: removed.length });
 });
 
 // --- Public API Routes ---
 
-// Community styles require Discord auth to view
 app.get('/api/styles', (req, res) => {
   const session = getSession(req);
   if (!session) return res.status(401).json({ error: 'Login with Discord to view community styles.' });
-  const styles = loadStyles();
-  // Strip IPs and private data for public view, add public reactions
   res.json(styles.map(({ ip, discordId, reactions, ...rest }) => ({
     ...rest,
     reactions: getPublicReactions(reactions, session.discordId),
@@ -445,7 +447,6 @@ app.post('/api/styles', (req, res) => {
     return res.status(401).json({ error: 'Login with Discord to share styles.' });
   }
 
-  // Check if IP or Discord is banned
   if (bannedIPs.includes(ip) || bannedDiscords.includes(session.discordId)) {
     return res.status(403).json({ error: 'You have been blocked from posting.' });
   }
@@ -472,8 +473,6 @@ app.post('/api/styles', (req, res) => {
     return res.status(400).json({ error: 'Inappropriate content detected.' });
   }
 
-  const styles = loadStyles();
-
   const newStyle = {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     username: cleanUsername,
@@ -488,10 +487,8 @@ app.post('/api/styles', (req, res) => {
 
   styles.unshift(newStyle);
   if (styles.length > 500) styles.length = 500;
+  persistStyles();
 
-  saveStyles(styles);
-
-  // Broadcast without private data
   const { ip: _ip, discordId: _did, ...publicStyle } = newStyle;
   const publicStyleWithReactions = { ...publicStyle, reactions: getPublicReactions(null, null) };
   broadcast({ type: 'new_style', style: publicStyleWithReactions });
@@ -500,7 +497,7 @@ app.post('/api/styles', (req, res) => {
 
 // --- Admin API Routes ---
 
-const adminLoginAttempts = new Map(); // ip -> { count, resetAt }
+const adminLoginAttempts = new Map();
 
 app.post('/api/admin/login', (req, res) => {
   const ip = getClientIP(req);
@@ -525,9 +522,7 @@ app.post('/api/admin/login', (req, res) => {
   }
 });
 
-// Get all styles with IPs (admin only)
 app.get('/api/admin/styles', requireAdmin, (req, res) => {
-  const styles = loadStyles();
   const session = getSession(req);
   res.json(styles.map(style => ({
     ...style,
@@ -535,101 +530,81 @@ app.get('/api/admin/styles', requireAdmin, (req, res) => {
   })));
 });
 
-// Delete a style by ID
 app.delete('/api/admin/styles/:id', requireAdmin, (req, res) => {
-  const styles = loadStyles();
-  const filtered = styles.filter(s => s.id !== req.params.id);
-  if (filtered.length === styles.length) {
-    return res.status(404).json({ error: 'Style not found.' });
-  }
-  saveStyles(filtered);
+  const idx = styles.findIndex(s => s.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Style not found.' });
+  styles.splice(idx, 1);
+  persistStyles();
   broadcast({ type: 'delete_style', id: req.params.id });
   res.json({ success: true });
 });
 
-// Get banned IPs
 app.get('/api/admin/banned', requireAdmin, (req, res) => {
   res.json(bannedIPs);
 });
 
-// Ban an IP
 app.post('/api/admin/ban', requireAdmin, (req, res) => {
   const { ip } = req.body;
   if (!ip) return res.status(400).json({ error: 'IP is required.' });
   if (!bannedIPs.includes(ip)) {
     bannedIPs.push(ip);
-    saveBannedIPs(bannedIPs);
+    persistBannedIPs();
   }
   res.json({ success: true, bannedIPs });
 });
 
-// Unban an IP
 app.post('/api/admin/unban', requireAdmin, (req, res) => {
   const { ip } = req.body;
   bannedIPs = bannedIPs.filter(i => i !== ip);
-  saveBannedIPs(bannedIPs);
+  persistBannedIPs();
   res.json({ success: true, bannedIPs });
 });
 
-// Ban a Discord user
 app.post('/api/admin/ban-discord', requireAdmin, (req, res) => {
   const { discordId } = req.body;
   if (!discordId) return res.status(400).json({ error: 'Discord ID is required.' });
   if (!bannedDiscords.includes(discordId)) {
     bannedDiscords.push(discordId);
-    saveBannedDiscords(bannedDiscords);
+    persistBannedDiscords();
   }
   res.json({ success: true });
 });
 
-// Unban a Discord user
 app.post('/api/admin/unban-discord', requireAdmin, (req, res) => {
   const { discordId } = req.body;
   bannedDiscords = bannedDiscords.filter(id => id !== discordId);
-  saveBannedDiscords(bannedDiscords);
+  persistBannedDiscords();
   res.json({ success: true });
 });
 
-// Purge all styles from a Discord user
 app.post('/api/admin/purge-discord', requireAdmin, (req, res) => {
   const { discordId } = req.body;
   if (!discordId) return res.status(400).json({ error: 'Discord ID is required.' });
-  const styles = loadStyles();
   const removed = styles.filter(s => s.discordId === discordId);
-  const kept = styles.filter(s => s.discordId !== discordId);
-  saveStyles(kept);
+  styles = styles.filter(s => s.discordId !== discordId);
+  persistStyles();
   removed.forEach(s => broadcast({ type: 'delete_style', id: s.id }));
   res.json({ success: true, deleted: removed.length });
 });
 
-// Admin: list online users
 app.get('/api/admin/online', requireAdmin, (req, res) => {
-  const users = [];
+  const onlineList = [];
   const seen = new Set();
   for (const [, user] of onlineUsers) {
     if (!seen.has(user.discordId)) {
       seen.add(user.discordId);
-      users.push({ discordId: user.discordId, username: user.globalName || user.username, avatar: user.avatar });
+      onlineList.push({ discordId: user.discordId, username: user.globalName || user.username, avatar: user.avatar });
     }
   }
-  res.json(users);
+  res.json(onlineList);
 });
 
-// Admin: list all registered users with storage info
 app.get('/api/admin/users', requireAdmin, (req, res) => {
-  const users = loadUsers();
   const result = Object.entries(users).map(([discordId, data]) => {
     const tabCount = data.tabs ? data.tabs.length : 0;
     const dataSize = JSON.stringify(data).length;
-    return {
-      discordId,
-      theme: data.theme || 'default',
-      tabCount,
-      dataSize,
-      updatedAt: data.updatedAt || null,
-    };
+    return { discordId, theme: data.theme || 'default', tabCount, dataSize, updatedAt: data.updatedAt || null };
   });
-  // Enrich with online status and username from active sessions
   const onlineIds = new Set([...onlineUsers.values()].map(u => u.discordId));
   const sessionMap = new Map();
   for (const s of sessions.values()) {
@@ -650,26 +625,34 @@ app.get('/api/admin/users', requireAdmin, (req, res) => {
 
 // --- User Data Routes ---
 
+const USER_DATA_MAX_SIZE = 1024 * 1024; // 1MB per user
+
 app.get('/api/user/data', (req, res) => {
   const session = getSession(req);
   if (!session) return res.status(401).json({ error: 'Login required.' });
-  const users = loadUsers();
   res.json(users[session.discordId] || {});
 });
 
 app.post('/api/user/data', (req, res) => {
   const session = getSession(req);
   if (!session) return res.status(401).json({ error: 'Login required.' });
-  const { theme, tabs } = req.body;
-  const users = loadUsers();
+  const { theme, tabs, utilsOrder } = req.body;
   const existing = users[session.discordId] || {};
   if (theme !== undefined) existing.theme = theme;
   if (tabs !== undefined) {
     existing.tabs = Array.isArray(tabs) ? tabs.slice(0, 100) : existing.tabs;
   }
+  if (utilsOrder !== undefined) {
+    existing.utilsOrder = Array.isArray(utilsOrder) ? utilsOrder.slice(0, 50) : existing.utilsOrder;
+  }
+  // Check size limit
+  const size = JSON.stringify(existing).length;
+  if (size > USER_DATA_MAX_SIZE) {
+    return res.status(413).json({ error: 'Data exceeds 1MB limit. Remove some tabs.' });
+  }
   existing.updatedAt = new Date().toISOString();
   users[session.discordId] = existing;
-  saveUsers(users);
+  persistUsers();
   res.json({ success: true });
 });
 
@@ -684,11 +667,9 @@ app.post('/api/styles/:id/react', (req, res) => {
     return res.status(400).json({ error: 'Invalid reaction type.' });
   }
 
-  const styles = loadStyles();
   const style = styles.find(s => s.id === req.params.id);
   if (!style) return res.status(404).json({ error: 'Style not found.' });
 
-  // Initialize reactions if missing
   if (!style.reactions) {
     style.reactions = { up: [], down: [], emojis: {} };
   }
@@ -702,16 +683,13 @@ app.post('/api/styles/:id/react', (req, res) => {
     const opposite = type === 'up' ? 'down' : 'up';
     const idx = style.reactions[type].indexOf(uid);
     if (idx !== -1) {
-      // Toggle off
       style.reactions[type].splice(idx, 1);
     } else {
-      // Add vote, remove opposite
       style.reactions[type].push(uid);
       const oppIdx = style.reactions[opposite].indexOf(uid);
       if (oppIdx !== -1) style.reactions[opposite].splice(oppIdx, 1);
     }
   } else {
-    // Emoji reaction
     if (!style.reactions.emojis[type]) style.reactions.emojis[type] = [];
     const arr = style.reactions.emojis[type];
     const idx = arr.indexOf(uid);
@@ -722,14 +700,14 @@ app.post('/api/styles/:id/react', (req, res) => {
     }
   }
 
-  saveStyles(styles);
+  persistStyles();
 
   const publicReactions = getPublicReactions(style.reactions, uid);
   broadcast({ type: 'react_style', id: style.id, reactions: getPublicReactions(style.reactions, null) });
   res.json({ reactions: publicReactions });
 });
 
-// SPA fallback (Express 5 syntax)
+// SPA fallback
 app.get('/{*path}', (req, res) => {
   res.sendFile(join(__dirname, 'dist', 'index.html'));
 });
