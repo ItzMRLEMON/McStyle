@@ -1,0 +1,25 @@
+services:
+  api:
+    build:
+      context: .
+      target: api
+    container_name: mcstyle-api
+    ports:
+      - "5859:5858"
+    volumes:
+      - mcstyle-data:/app/data
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      target: web
+    container_name: mcstyle-web
+    ports:
+      - "5858:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  mcstyle-data:

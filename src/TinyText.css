@@ -1,0 +1,92 @@
+.tiny-text-panel {
+  background: var(--bg-card);
+  border-radius: 8px;
+  padding: 16px;
+  border: 1px solid var(--border);
+}
+
+.tiny-input {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg-mc);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+  margin-top: 8px;
+  transition: border-color 0.15s;
+}
+
+.tiny-input:focus {
+  border-color: var(--accent-dim);
+}
+
+.tiny-input::placeholder {
+  color: #555;
+}
+
+.tiny-results {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tiny-result-row {
+  background: var(--bg-mc);
+  border-radius: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+}
+
+.tiny-result-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.tiny-result-value {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tiny-result-text {
+  font-size: 16px;
+  color: var(--text);
+  word-break: break-all;
+  flex: 1;
+}
+
+.tiny-copy-btn {
+  padding: 3px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s;
+  min-width: 55px;
+}
+
+.tiny-copy-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tiny-hint {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.tiny-hint strong {
+  color: var(--text);
+}
