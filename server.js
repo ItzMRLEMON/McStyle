@@ -33,6 +33,18 @@ function broadcast(data) {
   }
 }
 
+// Online user tracking
+wss.on('connection', (ws) => {
+  // Send current count to the newly connected client
+  ws.send(JSON.stringify({ type: 'online_count', count: wss.clients.size }));
+  // Broadcast updated count to all clients
+  broadcast({ type: 'online_count', count: wss.clients.size });
+
+  ws.on('close', () => {
+    broadcast({ type: 'online_count', count: wss.clients.size });
+  });
+});
+
 // Heartbeat to keep connections alive
 setInterval(() => {
   for (const client of wss.clients) {
@@ -102,6 +114,7 @@ function isStrictProfane(text) {
 const DATA_DIR = process.env.DATA_DIR || join(__dirname, 'data');
 const DATA_FILE = join(DATA_DIR, 'styles.json');
 const BANNED_FILE = join(DATA_DIR, 'banned_ips.json');
+const USERS_FILE = join(DATA_DIR, 'users.json');
 
 if (!existsSync(DATA_DIR)) {
   mkdirSync(DATA_DIR, { recursive: true });
@@ -131,6 +144,45 @@ function loadBannedIPs() {
 
 function saveBannedIPs(ips) {
   writeFileSync(BANNED_FILE, JSON.stringify(ips, null, 2));
+}
+
+function loadUsers() {
+  if (!existsSync(USERS_FILE)) return {};
+  try {
+    return JSON.parse(readFileSync(USERS_FILE, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveUsers(users) {
+  writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+}
+
+const ALLOWED_EMOJIS = ['🔥', '❤️', '👍', '👎', '😂', '🎨'];
+
+// Convert raw reactions (with discordId arrays) to public counts
+function getPublicReactions(reactions, sessionDiscordId) {
+  if (!reactions) {
+    const result = { up: 0, down: 0, emojis: {}, userVote: null, userEmojis: [] };
+    return result;
+  }
+  const up = (reactions.up || []).length;
+  const down = (reactions.down || []).length;
+  const emojis = {};
+  for (const [emoji, users] of Object.entries(reactions.emojis || {})) {
+    if (users.length > 0) emojis[emoji] = users.length;
+  }
+  let userVote = null;
+  let userEmojis = [];
+  if (sessionDiscordId) {
+    if ((reactions.up || []).includes(sessionDiscordId)) userVote = 'up';
+    else if ((reactions.down || []).includes(sessionDiscordId)) userVote = 'down';
+    for (const [emoji, users] of Object.entries(reactions.emojis || {})) {
+      if (users.includes(sessionDiscordId)) userEmojis.push(emoji);
+    }
+  }
+  return { up, down, emojis, userVote, userEmojis };
 }
 
 let bannedIPs = loadBannedIPs();
@@ -293,8 +345,11 @@ app.get('/api/styles', (req, res) => {
   const session = getSession(req);
   if (!session) return res.status(401).json({ error: 'Login with Discord to view community styles.' });
   const styles = loadStyles();
-  // Strip IPs and private data for public view
-  res.json(styles.map(({ ip, discordId, ...rest }) => rest));
+  // Strip IPs and private data for public view, add public reactions
+  res.json(styles.map(({ ip, discordId, reactions, ...rest }) => ({
+    ...rest,
+    reactions: getPublicReactions(reactions, session.discordId),
+  })));
 });
 
 app.post('/api/styles', (req, res) => {
@@ -342,6 +397,7 @@ app.post('/api/styles', (req, res) => {
     ip: ip,
     discordId: session.discordId,
     discordName: session.globalName || session.username,
+    discordAvatar: session.avatar || null,
     createdAt: new Date().toISOString(),
   };
 
@@ -352,8 +408,9 @@ app.post('/api/styles', (req, res) => {
 
   // Broadcast without private data
   const { ip: _ip, discordId: _did, ...publicStyle } = newStyle;
-  broadcast({ type: 'new_style', style: publicStyle });
-  res.status(201).json(publicStyle);
+  const publicStyleWithReactions = { ...publicStyle, reactions: getPublicReactions(null, null) };
+  broadcast({ type: 'new_style', style: publicStyleWithReactions });
+  res.status(201).json(publicStyleWithReactions);
 });
 
 // --- Admin API Routes ---
@@ -370,7 +427,11 @@ app.post('/api/admin/login', (req, res) => {
 // Get all styles with IPs (admin only)
 app.get('/api/admin/styles', requireAdmin, (req, res) => {
   const styles = loadStyles();
-  res.json(styles);
+  const session = getSession(req);
+  res.json(styles.map(style => ({
+    ...style,
+    reactions: getPublicReactions(style.reactions, session ? session.discordId : null),
+  })));
 });
 
 // Delete a style by ID
@@ -407,6 +468,87 @@ app.post('/api/admin/unban', requireAdmin, (req, res) => {
   bannedIPs = bannedIPs.filter(i => i !== ip);
   saveBannedIPs(bannedIPs);
   res.json({ success: true, bannedIPs });
+});
+
+// --- User Data Routes ---
+
+app.get('/api/user/data', (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Login required.' });
+  const users = loadUsers();
+  res.json(users[session.discordId] || {});
+});
+
+app.post('/api/user/data', (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Login required.' });
+  const { theme, tabs } = req.body;
+  const users = loadUsers();
+  const existing = users[session.discordId] || {};
+  if (theme !== undefined) existing.theme = theme;
+  if (tabs !== undefined) {
+    existing.tabs = Array.isArray(tabs) ? tabs.slice(0, 100) : existing.tabs;
+  }
+  existing.updatedAt = new Date().toISOString();
+  users[session.discordId] = existing;
+  saveUsers(users);
+  res.json({ success: true });
+});
+
+// --- Reaction Route ---
+
+app.post('/api/styles/:id/react', (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Login required.' });
+
+  const { type } = req.body;
+  if (!type || !['up', 'down', ...ALLOWED_EMOJIS].includes(type)) {
+    return res.status(400).json({ error: 'Invalid reaction type.' });
+  }
+
+  const styles = loadStyles();
+  const style = styles.find(s => s.id === req.params.id);
+  if (!style) return res.status(404).json({ error: 'Style not found.' });
+
+  // Initialize reactions if missing
+  if (!style.reactions) {
+    style.reactions = { up: [], down: [], emojis: {} };
+  }
+  if (!style.reactions.up) style.reactions.up = [];
+  if (!style.reactions.down) style.reactions.down = [];
+  if (!style.reactions.emojis) style.reactions.emojis = {};
+
+  const uid = session.discordId;
+
+  if (type === 'up' || type === 'down') {
+    const opposite = type === 'up' ? 'down' : 'up';
+    const idx = style.reactions[type].indexOf(uid);
+    if (idx !== -1) {
+      // Toggle off
+      style.reactions[type].splice(idx, 1);
+    } else {
+      // Add vote, remove opposite
+      style.reactions[type].push(uid);
+      const oppIdx = style.reactions[opposite].indexOf(uid);
+      if (oppIdx !== -1) style.reactions[opposite].splice(oppIdx, 1);
+    }
+  } else {
+    // Emoji reaction
+    if (!style.reactions.emojis[type]) style.reactions.emojis[type] = [];
+    const arr = style.reactions.emojis[type];
+    const idx = arr.indexOf(uid);
+    if (idx !== -1) {
+      arr.splice(idx, 1);
+    } else {
+      arr.push(uid);
+    }
+  }
+
+  saveStyles(styles);
+
+  const publicReactions = getPublicReactions(style.reactions, uid);
+  broadcast({ type: 'react_style', id: style.id, reactions: getPublicReactions(style.reactions, null) });
+  res.json({ reactions: publicReactions });
 });
 
 // SPA fallback (Express 5 syntax)

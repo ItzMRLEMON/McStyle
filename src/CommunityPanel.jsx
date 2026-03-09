@@ -72,6 +72,8 @@ function saveHistory(items) {
   localStorage.setItem('mcstyle_history', JSON.stringify(items));
 }
 
+const AVAILABLE_EMOJIS = ['\uD83D\uDD25', '\u2764\uFE0F', '\uD83D\uDC4D', '\uD83D\uDC4E', '\uD83D\uDE02', '\uD83C\uDFA8'];
+
 export default function CommunityPanel({ currentFormatString, open, onToggle, onModify, discordUser, authLoading }) {
   const openRef = useRef(open);
   const [tab, setTab] = useState('history');
@@ -89,6 +91,10 @@ export default function CommunityPanel({ currentFormatString, open, onToggle, on
   // History state
   const [history, setHistory] = useState(loadHistory);
   const [historyLabel, setHistoryLabel] = useState('');
+
+  // Sort state
+  const [sortBy, setSortBy] = useState('newest');
+  const [sortDesc, setSortDesc] = useState(true);
 
   useEffect(() => {
     openRef.current = open;
@@ -125,6 +131,8 @@ export default function CommunityPanel({ currentFormatString, open, onToggle, on
             if (!openRef.current) playPing();
           } else if (msg.type === 'delete_style') {
             setStyles((prev) => prev.filter(s => s.id !== msg.id));
+          } else if (msg.type === 'react_style') {
+            setStyles((prev) => prev.map(s => s.id === msg.id ? { ...s, reactions: msg.reactions } : s));
           }
         } catch { /* ignore */ }
       };
@@ -196,6 +204,64 @@ export default function CommunityPanel({ currentFormatString, open, onToggle, on
     }
     setSubmitting(false);
   };
+
+  const handleReact = async (styleId, type) => {
+    // Optimistic update
+    setStyles((prev) => prev.map(s => {
+      if (s.id !== styleId) return s;
+      const r = s.reactions || { up: 0, down: 0, emojis: {}, userVote: null, userEmojis: [] };
+      const updated = { ...r, emojis: { ...r.emojis }, userEmojis: [...(r.userEmojis || [])] };
+      if (type === 'up' || type === 'down') {
+        if (updated.userVote === type) {
+          updated[type] = Math.max(0, updated[type] - 1);
+          updated.userVote = null;
+        } else {
+          if (updated.userVote) updated[updated.userVote] = Math.max(0, updated[updated.userVote] - 1);
+          updated[type] = (updated[type] || 0) + 1;
+          updated.userVote = type;
+        }
+      } else {
+        // emoji toggle
+        if (updated.userEmojis.includes(type)) {
+          updated.userEmojis = updated.userEmojis.filter(e => e !== type);
+          updated.emojis[type] = Math.max(0, (updated.emojis[type] || 1) - 1);
+          if (updated.emojis[type] === 0) delete updated.emojis[type];
+        } else {
+          updated.userEmojis.push(type);
+          updated.emojis[type] = (updated.emojis[type] || 0) + 1;
+        }
+      }
+      return { ...s, reactions: updated };
+    }));
+    try {
+      await fetch(`/api/styles/${styleId}/react`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type }),
+      });
+    } catch { /* server will reconcile via WS */ }
+  };
+
+  // Sort styles
+  const sortedStyles = [...styles].sort((a, b) => {
+    const dir = sortDesc ? -1 : 1;
+    if (sortBy === 'newest') {
+      return dir * (new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    }
+    if (sortBy === 'upvoted') {
+      const aUp = (a.reactions?.up || 0) - (a.reactions?.down || 0);
+      const bUp = (b.reactions?.up || 0) - (b.reactions?.down || 0);
+      return dir * (bUp - aUp);
+    }
+    if (sortBy === 'user') {
+      const nameA = (a.discordName || a.username || '').toLowerCase();
+      const nameB = (b.discordName || b.username || '').toLowerCase();
+      const cmp = nameA.localeCompare(nameB);
+      if (cmp !== 0) return dir * cmp;
+      return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+    }
+    return 0;
+  });
 
   const copyStyle = (formatString, id) => {
     navigator.clipboard.writeText(formatString).then(() => {
@@ -295,12 +361,14 @@ export default function CommunityPanel({ currentFormatString, open, onToggle, on
             {tab === 'community' && !discordUser && (
               <div className="community-login-gate">
                 <div className="login-gate-icon">
-                  <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#5865F2" strokeWidth="1.5">
-                    <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z" />
-                  </svg>
+                  <img src="https://img.icons8.com/color/96/discord-logo.png" alt="Discord" width="48" height="48" />
                 </div>
-                <p className="login-gate-title">Discord Login Required</p>
-                <p className="login-gate-desc">Link your Discord account to view and share community styles.</p>
+                <p className="login-gate-title">Connect with Discord</p>
+                <ul className="login-gate-list">
+                  <li>Save your projects to the cloud</li>
+                  <li>Collaborate with others</li>
+                  <li>See what the community is creating!</li>
+                </ul>
                 <button className="discord-login-btn" onClick={async () => {
                   try {
                     const res = await fetch('/api/auth/discord-url');
@@ -308,9 +376,7 @@ export default function CommunityPanel({ currentFormatString, open, onToggle, on
                     if (data.url) window.location.href = data.url;
                   } catch { /* */ }
                 }}>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z" />
-                  </svg>
+                  <img src="https://img.icons8.com/ios/50/discord-logo--v1.png" alt="" width="18" height="18" style={{ filter: 'invert(1)' }} />
                   Login with Discord
                 </button>
               </div>
@@ -360,37 +426,91 @@ export default function CommunityPanel({ currentFormatString, open, onToggle, on
 
                 <div className="community-divider" />
 
+                <div className="community-sort-bar">
+                  <select
+                    className="community-sort-select"
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value)}
+                  >
+                    <option value="newest">Newest</option>
+                    <option value="upvoted">Most Upvoted</option>
+                    <option value="user">By User</option>
+                  </select>
+                  <button
+                    className="community-sort-direction"
+                    onClick={() => setSortDesc(d => !d)}
+                    title={sortDesc ? 'Descending' : 'Ascending'}
+                  >
+                    {sortDesc ? '\u2193' : '\u2191'}
+                  </button>
+                </div>
+
                 <div className="community-list">
                   {loading && <div className="community-loading">Loading...</div>}
                   {!loading && styles.length === 0 && (
                     <div className="community-empty">No styles shared yet. Be the first!</div>
                   )}
-                  {styles.map((style) => (
-                    <div key={style.id} className="community-card">
-                      <div className="community-card-preview">
-                        <MiniMCPreview text={style.formatString + style.username} />
+                  {sortedStyles.map((style) => {
+                    const r = style.reactions || { up: 0, down: 0, emojis: {}, userVote: null, userEmojis: [] };
+                    return (
+                      <div key={style.id} className="community-card">
+                        <div className="community-card-preview">
+                          <MiniMCPreview text={style.formatString + style.username} />
+                        </div>
+                        <div className="community-card-info">
+                          {style.discordAvatar && <img className="community-card-avatar" src={style.discordAvatar} alt="" />}
+                          <span className="community-card-user">{style.username}</span>
+                          {style.label && <span className="community-card-label">{style.label}</span>}
+                          {style.discordName && <span className="community-card-discord">{style.discordName}</span>}
+                        </div>
+                        <div className="community-card-actions">
+                          <button
+                            className="community-card-copy"
+                            onClick={() => copyStyle(style.formatString, style.id)}
+                          >
+                            {copiedId === style.id ? 'Copied!' : 'Copy'}
+                          </button>
+                          <button
+                            className="community-card-modify"
+                            onClick={() => onModify && onModify(style.formatString, style.label || style.username)}
+                          >
+                            Modify
+                          </button>
+                        </div>
+                        <div className="community-reactions">
+                          <div className="reaction-votes">
+                            <button
+                              className={`reaction-vote reaction-up ${r.userVote === 'up' ? 'active' : ''}`}
+                              onClick={() => handleReact(style.id, 'up')}
+                            >
+                              {'\u25B2'} {r.up || 0}
+                            </button>
+                            <button
+                              className={`reaction-vote reaction-down ${r.userVote === 'down' ? 'active' : ''}`}
+                              onClick={() => handleReact(style.id, 'down')}
+                            >
+                              {'\u25BC'} {r.down || 0}
+                            </button>
+                          </div>
+                          <div className="reaction-emojis">
+                            {AVAILABLE_EMOJIS.map(emoji => {
+                              const count = r.emojis?.[emoji] || 0;
+                              const active = r.userEmojis?.includes(emoji);
+                              return (
+                                <button
+                                  key={emoji}
+                                  className={`reaction-emoji ${active ? 'active' : ''}`}
+                                  onClick={() => handleReact(style.id, emoji)}
+                                >
+                                  {emoji}{count > 0 ? ` ${count}` : ''}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
                       </div>
-                      <div className="community-card-info">
-                        <span className="community-card-user">{style.username}</span>
-                        {style.label && <span className="community-card-label">{style.label}</span>}
-                        {style.discordName && <span className="community-card-discord">{style.discordName}</span>}
-                      </div>
-                      <div className="community-card-actions">
-                        <button
-                          className="community-card-copy"
-                          onClick={() => copyStyle(style.formatString, style.id)}
-                        >
-                          {copiedId === style.id ? 'Copied!' : 'Copy'}
-                        </button>
-                        <button
-                          className="community-card-modify"
-                          onClick={() => onModify && onModify(style.formatString, style.label || style.username)}
-                        >
-                          Modify
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </>
             )}

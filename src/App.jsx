@@ -119,6 +119,14 @@ function saveTabs(tabs, activeTabId) {
 
 const PREVIEW_NAME = 'Steve';
 
+const THEMES = [
+  { id: 'default', label: 'Default Dark', colors: ['#1a1125', '#f5c842', '#3d2d56'] },
+  { id: 'midnight', label: 'Midnight', colors: ['#0d0d1a', '#7b8cff', '#2a2a44'] },
+  { id: 'nord', label: 'Nord', colors: ['#2e3440', '#88c0d0', '#4c566a'] },
+  { id: 'monokai', label: 'Monokai', colors: ['#272822', '#a6e22e', '#49483e'] },
+  { id: 'light', label: 'Light', colors: ['#e8e8ee', '#2a8a2a', '#c0c0cc'] },
+];
+
 function App() {
   const [tabs, setTabs] = useState(() => {
     const saved = loadSavedTabs();
@@ -131,9 +139,45 @@ function App() {
   const [communityOpen, setCommunityOpen] = useState(true);
   const [utilsOpen, setUtilsOpen] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [theme, setTheme] = useState(() => localStorage.getItem('mcstyle_theme') || 'default');
+  const [openMenu, setOpenMenu] = useState(null);
+  const [onlineCount, setOnlineCount] = useState(0);
   const textareaRef = useRef(null);
   const snifferCooldown = useRef(false);
   const clickTimeout = useRef(null);
+
+  // Apply theme
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('mcstyle_theme', theme);
+  }, [theme]);
+
+  // WebSocket for online count
+  useEffect(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'online_count') {
+          setOnlineCount(data.count);
+        }
+      } catch { /* ignore */ }
+    };
+    return () => ws.close();
+  }, []);
+
+  // Close menu on click outside
+  useEffect(() => {
+    if (!openMenu) return;
+    const handleClick = (e) => {
+      if (!e.target.closest('.menubar')) {
+        setOpenMenu(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [openMenu]);
 
   const playSnifferSound = () => {
     if (snifferCooldown.current) return;
@@ -165,6 +209,50 @@ function App() {
   // Discord auth state
   const [discordUser, setDiscordUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const cloudSyncedRef = useRef(false); // track if we already loaded cloud data
+  const cloudSaveTimer = useRef(null);
+
+  // Fetch cloud data once user is available
+  useEffect(() => {
+    if (!discordUser || cloudSyncedRef.current) return;
+    cloudSyncedRef.current = true;
+    fetch('/api/user/data').then(res => {
+      if (res.ok) return res.json();
+      return null;
+    }).then(data => {
+      if (!data) return;
+      if (data.theme) {
+        setTheme(data.theme);
+      }
+      if (data.tabs && data.tabs.length > 0) {
+        const cloudTabs = data.tabs.map(t => ({
+          ...createTab(t.name, t.rawText),
+          ...t,
+          id: Date.now().toString() + Math.random().toString(36).slice(2, 6),
+          saved: false,
+        }));
+        setTabs(cloudTabs);
+        setActiveTabId(cloudTabs[0].id);
+      }
+    }).catch(() => {});
+  }, [discordUser]);
+
+  // Auto-save to cloud (debounced 3s) when tabs or theme change and user is logged in
+  useEffect(() => {
+    if (!discordUser || !cloudSyncedRef.current) return;
+    if (cloudSaveTimer.current) clearTimeout(cloudSaveTimer.current);
+    cloudSaveTimer.current = setTimeout(() => {
+      const strippedTabs = tabs.map(({ id, saved, ...rest }) => rest);
+      fetch('/api/user/data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ theme, tabs: strippedTabs }),
+      }).catch(() => {});
+    }, 3000);
+    return () => {
+      if (cloudSaveTimer.current) clearTimeout(cloudSaveTimer.current);
+    };
+  }, [tabs, theme, discordUser]);
 
   useEffect(() => {
     // Check if user is logged in
@@ -446,7 +534,108 @@ function App() {
     input.click();
   };
 
+  const toggleMenu = (menu) => {
+    setOpenMenu(prev => prev === menu ? null : menu);
+  };
+
   return (
+    <>
+    {/* Menu Bar */}
+    <div className="menubar">
+      <div className="menubar-left">
+        <img
+          src="/mcstyle-logo.png"
+          alt="MCStyle"
+          className="menubar-logo"
+          onClick={handleLogoClick}
+          onDoubleClick={handleLogoDoubleClick}
+          draggable={false}
+        />
+        <div className="menubar-item" onClick={() => toggleMenu('file')}>
+          File
+          {openMenu === 'file' && (
+            <div className="menubar-dropdown">
+              <div className="menubar-dropdown-item" onClick={() => { addTab(); setOpenMenu(null); }}>
+                New Tab
+              </div>
+              <div className="menubar-dropdown-item" onClick={() => {
+                if (/^Tab \d+$/.test(tab.name)) {
+                  setNamePromptValue(tab.name);
+                  setShowNamePrompt(true);
+                } else {
+                  saveCurrentTabRef.current();
+                }
+                setOpenMenu(null);
+              }}>
+                Save<span className="menubar-shortcut">Ctrl+S</span>
+              </div>
+              <div className="menubar-dropdown-item" onClick={() => {
+                setNamePromptValue(tab.name);
+                setShowNamePrompt(true);
+                setOpenMenu(null);
+              }}>
+                Save As<span className="menubar-shortcut">Ctrl+Shift+S</span>
+              </div>
+              <div className="menubar-separator" />
+              <div className="menubar-dropdown-item" onClick={() => { importFile(); setOpenMenu(null); }}>
+                Import .mcstyle
+              </div>
+              <div className="menubar-dropdown-item" onClick={() => { exportTab(); setOpenMenu(null); }}>
+                Export Tab
+              </div>
+              <div className="menubar-dropdown-item" onClick={() => { exportAllTabs(); setOpenMenu(null); }}>
+                Export All
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="menubar-item" onClick={() => toggleMenu('view')}>
+          View
+          {openMenu === 'view' && (
+            <div className="menubar-dropdown">
+              <div className="menubar-dropdown-item menubar-submenu-parent">
+                Theme
+                <span className="menubar-submenu-arrow">&#9656;</span>
+                <div className="menubar-submenu">
+                  {THEMES.map(t => (
+                    <div
+                      key={t.id}
+                      className={`menubar-dropdown-item ${theme === t.id ? 'menubar-active' : ''}`}
+                      onClick={(e) => { e.stopPropagation(); setTheme(t.id); setOpenMenu(null); }}
+                    >
+                      {theme === t.id && <span className="menubar-check">&#10003;</span>}
+                      {t.label}
+                      <span className="theme-swatches">
+                        {t.colors.map((c, i) => (
+                          <span key={i} className="theme-swatch" style={{ background: c }} />
+                        ))}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="menubar-right">
+        <div className="menubar-online">
+          <span className="menubar-online-dot" />
+          {onlineCount} online
+        </div>
+        {discordUser && (
+          <div className="menubar-user">
+            <img
+              src={discordUser.avatar}
+              alt=""
+              className="menubar-avatar"
+            />
+            <span className="menubar-username">{discordUser.username}</span>
+          </div>
+        )}
+      </div>
+    </div>
+
     <div className="layout-root">
     <CommunityPanel
       currentFormatString={currentFormatString}
@@ -457,17 +646,6 @@ function App() {
       authLoading={authLoading}
     />
     <div className="app">
-      <header className="header">
-        <img
-          src="/mcstyle-logo.png"
-          alt="MCStyle"
-          className="header-logo"
-          onClick={handleLogoClick}
-          onDoubleClick={handleLogoDoubleClick}
-          draggable={false}
-        />
-        <p className="subtitle">LuckPerms &amp; TAB Prefix Editor</p>
-      </header>
 
       {/* Project Tabs */}
       <div className="project-tabs">
@@ -489,16 +667,7 @@ function App() {
           </div>
         ))}
         <button className="project-tab-add" onClick={() => addTab()}>+</button>
-        <div className="project-tab-spacer" />
-        <button className="project-tab-action" onClick={importFile} title="Import .mcstyle file">
-          Import
-        </button>
-        <button className="project-tab-action" onClick={exportTab} title="Export current tab">
-          Export
-        </button>
-        <button className="project-tab-action" onClick={exportAllTabs} title="Export all tabs">
-          Export All
-        </button>
+        {discordUser && <span className="cloud-sync-note">Cloud sync: up to 100 projects saved</span>}
       </div>
 
       <div className="page-layout">
@@ -852,12 +1021,14 @@ function App() {
 
       <footer className="footer">
         <p>McStyle - 2026 - by <a href="https://github.com/CelesteRed" target="_blank" rel="noopener noreferrer">Celeste</a> &lt;3</p>
+        <p><a href="https://ko-fi.com/celestered" target="_blank" rel="noopener noreferrer">Buy me a Ko-fi</a></p>
       </footer>
 
     </div>
     <UtilsPanel open={utilsOpen} onToggle={setUtilsOpen} />
     <AdminPanel />
     </div>
+    </>
   );
 }
 
