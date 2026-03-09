@@ -193,6 +193,33 @@ function App() {
   };
 
   const [showSavePrompt, setShowSavePrompt] = useState(null); // tab id to close
+  const [showNamePrompt, setShowNamePrompt] = useState(false);
+  const [namePromptValue, setNamePromptValue] = useState('');
+  const saveCurrentTabRef = useRef(null);
+
+  // Ctrl+S = quick save, Ctrl+Shift+S = save as (name prompt)
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          // Save As - prompt for name
+          setNamePromptValue(tab.name);
+          setShowNamePrompt(true);
+        } else {
+          // Quick save - but if tab has a default name, prompt for a name first
+          if (/^Tab \d+$/.test(tab.name)) {
+            setNamePromptValue(tab.name);
+            setShowNamePrompt(true);
+          } else {
+            saveCurrentTabRef.current();
+          }
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [tab.name]);
 
   const closeTab = (id) => {
     if (tabs.length <= 1) return;
@@ -237,17 +264,27 @@ function App() {
   };
 
   // Save current tab without closing (clears dirty state)
-  const saveCurrentTab = () => {
+  const saveCurrentTab = (customName) => {
+    const name = customName || tab.name;
     const fs = tab.rawText.trim();
     const history = JSON.parse(localStorage.getItem('mcstyle_history') || '[]');
     const entry = {
       id: Date.now().toString(),
       formatString: fs,
-      label: tab.name,
+      label: name,
       date: new Date().toLocaleDateString(),
     };
     localStorage.setItem('mcstyle_history', JSON.stringify([entry, ...history].slice(0, 50)));
-    updateTab({ saved: true });
+    updateTab({ saved: true, name });
+  };
+
+  saveCurrentTabRef.current = saveCurrentTab;
+
+  // Save with name (from Ctrl+Shift+S prompt)
+  const saveWithName = () => {
+    const name = namePromptValue.trim() || tab.name;
+    saveCurrentTab(name);
+    setShowNamePrompt(false);
   };
 
   // Derived values from current tab
@@ -744,6 +781,32 @@ function App() {
                 Discard
               </button>
               <button className="save-prompt-btn cancel" onClick={() => setShowSavePrompt(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Ctrl+S name prompt modal */}
+      {showNamePrompt && (
+        <div className="save-prompt-overlay">
+          <div className="save-prompt">
+            <p>Save this tab with a name:</p>
+            <input
+              type="text"
+              className="save-name-input"
+              value={namePromptValue}
+              onChange={(e) => setNamePromptValue(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') saveWithName(); if (e.key === 'Escape') setShowNamePrompt(false); }}
+              autoFocus
+              placeholder="Tab name..."
+            />
+            <div className="save-prompt-actions">
+              <button className="save-prompt-btn save" onClick={saveWithName}>
+                Save
+              </button>
+              <button className="save-prompt-btn cancel" onClick={() => setShowNamePrompt(false)}>
                 Cancel
               </button>
             </div>

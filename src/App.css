@@ -739,6 +739,22 @@ body {
   border-color: #555;
 }
 
+.save-name-input {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+  margin-bottom: 4px;
+}
+
+.save-name-input:focus {
+  border-color: var(--accent-dim);
+}
+
 /* Footer */
 .footer {
   text-align: center;
